@@ -8,6 +8,7 @@ import { LineGeometry } from "three/examples/jsm/lines/LineGeometry.js";
 import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 
 type RouteName = "レイソルロード" | "テラス" | "未分類";
+type CategoryKey = "H" | "U" | "Y" | "A" | "S" | "CP" | "FM" | "MX" | "UN";
 
 type Comment = {
   id: string;
@@ -29,10 +30,16 @@ type NodeRecord = {
   label: THREE.Sprite;
 };
 
-const ROUTE_COLORS = {
-  レイソルロード: 0x00d9ff,
-  テラス: 0x8c52ff,
-  未分類: 0x5f7892,
+const CATEGORY_STYLES: Record<CategoryKey, { label: string; color: string; soft: string }> = {
+  H: { label: "高校生", color: "#22d3ee", soft: "#a5f3fc" },
+  U: { label: "大学生", color: "#397d9f", soft: "#397d9f" },
+  Y: { label: "若い社会人", color: "#8b5cf6", soft: "#ddd6fe" },
+  A: { label: "中高年", color: "#f59e0b", soft: "#fde68a" },
+  S: { label: "高齢者", color: "#ef4444", soft: "#fecaca" },
+  CP: { label: "カップル", color: "#ec4899", soft: "#fbcfe8" },
+  FM: { label: "家族", color: "#14b8a6", soft: "#99f6e4" },
+  MX: { label: "属性混合", color: "#a78bfa", soft: "#ede9fe" },
+  UN: { label: "その他・不明", color: "#94a3b8", soft: "#e2e8f0" },
 };
 
 function makeLabel(text: string, color: string, width = 512) {
@@ -41,7 +48,7 @@ function makeLabel(text: string, color: string, width = 512) {
   canvas.height = 128;
   const context = canvas.getContext("2d")!;
   context.clearRect(0, 0, canvas.width, canvas.height);
-  context.font = "500 42px 'Yu Gothic', 'Meiryo', sans-serif";
+  context.font = "500 42px 'Ubuntu', 'Kiwi Maru', sans-serif";
   context.textAlign = "center";
   context.textBaseline = "middle";
   context.shadowColor = color;
@@ -61,7 +68,7 @@ function makeNodeLabel(text: string, color: string) {
   canvas.width = 512;
   canvas.height = 96;
   const context = canvas.getContext("2d")!;
-  context.font = "500 23px 'Yu Gothic', 'Meiryo', sans-serif";
+  context.font = "500 23px 'Ubuntu', 'Kiwi Maru', sans-serif";
   context.textAlign = "center";
   context.textBaseline = "middle";
   context.shadowColor = "#01050d";
@@ -110,14 +117,41 @@ function getObservationMinutes(comment: Comment) {
   return (comment.hour ?? 18) * 60;
 }
 
-function getPeopleCount(comment: Comment) {
-  const text = `${comment.title} ${comment.description}`.normalize("NFKC");
-  const ignoredSuffixes = new Set(["時", "分", "秒", "年", "月", "日", "円", "%", "歳"]);
-  const counts = Array.from(text.matchAll(/\d+/g), (match) => {
-    const end = (match.index ?? 0) + match[0].length;
-    return ignoredSuffixes.has(text.slice(end, end + 1)) ? 0 : Number(match[0]);
-  });
-  return Math.max(1, counts.reduce((total, count) => total + count, 0));
+function getMemoProfile(comment: Comment) {
+  const normalized = `${comment.title} ${comment.description}`
+    .normalize("NFKC")
+    .toUpperCase()
+    .replace(/(^|[^A-Z])YW(?=$|[^A-Z])/g, "$1YF")
+    .replace(/(^|[^A-Z])([HUYAS])\s*-\s*CP(?=$|[^A-Z])/g, "$1$2CP");
+  const matches: { symbol: string; count: number | null }[] = [];
+  const tokenPattern = /(^|[^A-Z])((?:[HUYAS](?:M|F|X|CP))|CP|FM|MX|UN)(?:\s*[- ]?\s*(\d+(?:\.\d+)*))?(?=$|[^A-Z])/g;
+  let match: RegExpExecArray | null;
+  while ((match = tokenPattern.exec(normalized))) {
+    const count = match[3]
+      ? match[3].split(".").reduce((total, value) => total + Number(value), 0)
+      : null;
+    matches.push({ symbol: match[2], count });
+  }
+  if (!matches.length) {
+    const ageOnly = normalized.match(/(?:^|[^A-Z])([HUYAS])\s*[- ]?\s*(\d+)(?=$|[^A-Z])/);
+    if (ageOnly) matches.push({ symbol: `${ageOnly[1]}X`, count: Number(ageOnly[2]) });
+  }
+  if (!matches.length) return { category: "UN" as CategoryKey, count: 1 };
+  const getCategory = (symbol: string) =>
+    (["CP", "FM", "MX", "UN"].includes(symbol) ? symbol : symbol[0]) as CategoryKey;
+  const categories = new Set(matches.map(({ symbol }) => getCategory(symbol)));
+  const category = (categories.size === 1 ? [...categories][0] : "MX") as CategoryKey;
+  const genderCounts = [...normalized.matchAll(/(?:女性|男性)\s*(\d+)\s*人/g)].map((result) => Number(result[1]));
+  const narrativeCount = genderCounts.length > 1
+    ? genderCounts.reduce((total, value) => total + value, 0)
+    : Number(normalized.match(/(\d+)\s*人/)?.[1]) || null;
+  const inferredCount = matches.reduce(
+    (total, item) => total + (item.count ?? (/CP$/.test(item.symbol) ? 2 : 1)),
+    0,
+  );
+  const hasMissingCount = matches.some((item) => item.count === null);
+  const count = narrativeCount && (hasMissingCount || matches.length > 1) ? narrativeCount : inferredCount;
+  return { category, count: Math.max(1, count) };
 }
 
 export function MindMap() {
@@ -162,11 +196,11 @@ export function MindMap() {
   useEffect(() => {
     for (const record of recordsRef.current) {
       const isSelected = record.comment.id === selected?.id;
-      const baseColor = ROUTE_COLORS[record.comment.route];
+      const baseColor = record.mesh.userData.baseColor as number;
       const material = record.mesh.material as THREE.MeshPhysicalMaterial;
       record.mesh.userData.selected = isSelected;
-      material.color.setHex(isSelected ? 0xf5ffd7 : baseColor);
-      material.emissive.setHex(isSelected ? 0xc8ff00 : baseColor);
+      material.color.setHex(isSelected ? 0xffffff : baseColor);
+      material.emissive.setHex(baseColor);
       material.emissiveIntensity = isSelected ? 9 : 1.55;
       material.roughness = isSelected ? 0.08 : 0.24;
       material.metalness = isSelected ? 0 : 0.5;
@@ -178,8 +212,8 @@ export function MindMap() {
     if (!mountRef.current || comments.length === 0) return;
     const mount = mountRef.current;
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x01050d);
-    scene.fog = new THREE.FogExp2(0x01050d, 0.018);
+    scene.background = new THREE.Color(0x020611);
+    scene.fog = new THREE.FogExp2(0x020611, 0.016);
 
     const camera = new THREE.PerspectiveCamera(52, mount.clientWidth / mount.clientHeight, 0.1, 160);
     camera.position.set(0, 8, 22);
@@ -200,15 +234,15 @@ export function MindMap() {
     controls.autoRotate = true;
     controls.autoRotateSpeed = 0.22;
 
-    scene.add(new THREE.AmbientLight(0x6fbaff, 0.5));
-    const cyanLight = new THREE.PointLight(0x00d9ff, 70, 35);
-    cyanLight.position.set(-8, 7, 9);
-    scene.add(cyanLight);
-    const purpleLight = new THREE.PointLight(0x8c52ff, 55, 35);
-    purpleLight.position.set(9, -4, 8);
-    scene.add(purpleLight);
+    scene.add(new THREE.AmbientLight(0x397d9f, 0.56));
+    const mapLight = new THREE.PointLight(0x00a7ff, 76, 38);
+    mapLight.position.set(-8, 7, 9);
+    scene.add(mapLight);
+    const fillLight = new THREE.PointLight(0x8b5cf6, 32, 34);
+    fillLight.position.set(9, -4, 8);
+    scene.add(fillLight);
 
-    const grid = new THREE.GridHelper(80, 40, 0x0b6f99, 0x082034);
+    const grid = new THREE.GridHelper(80, 40, 0x397d9f, 0x0b2338);
     grid.position.y = -8;
     scene.add(grid);
 
@@ -230,7 +264,7 @@ export function MindMap() {
     const graph = new THREE.Group();
     scene.add(graph);
 
-    const station = makeSphere(2.05, 0x00d9ff, 2.25);
+    const station = makeSphere(2.05, 0x00a7ff, 2.25);
     graph.add(station);
     const stationLabel = makeLabel("柏駅", "#b9f5ff", 340);
     stationLabel.position.set(0, 0, 2.2);
@@ -265,31 +299,45 @@ export function MindMap() {
     const earliestMinutes = Math.min(...observationMinutes);
     const latestMinutes = Math.max(...observationMinutes);
     const timeSpan = Math.max(latestMinutes - earliestMinutes, 1);
-    for (const comment of comments) {
-      const routeName = comment.route;
-      const vertical = Math.random() * 2 - 1;
+    const randomizedComments = comments
+      .map((comment) => ({ comment, order: Math.random() }))
+      .sort((a, b) => a.order - b.order)
+      .map(({ comment }) => comment);
+    const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+    const randomRotation = new THREE.Quaternion().setFromEuler(
+      new THREE.Euler(Math.random() * Math.PI * 2, Math.random() * Math.PI * 2, Math.random() * Math.PI * 2),
+    );
+    for (const [index, comment] of randomizedComments.entries()) {
+      const profile = getMemoProfile(comment);
+      const categoryStyle = CATEGORY_STYLES[profile.category];
+      const baseColor = new THREE.Color(categoryStyle.color).getHex();
+      const vertical = 1 - ((index + 0.5) / randomizedComments.length) * 2;
       const horizontal = Math.sqrt(1 - vertical * vertical);
-      const angle = Math.random() * Math.PI * 2;
+      const angle = index * goldenAngle;
       const timeProgress = (getObservationMinutes(comment) - earliestMinutes) / timeSpan;
-      const distanceFromStation = 5 + timeProgress * 12;
+      const distanceFromStation = 6 + timeProgress * 14;
       const position = new THREE.Vector3(
         Math.cos(angle) * horizontal,
         vertical,
         Math.sin(angle) * horizontal,
-      ).multiplyScalar(distanceFromStation);
-      const peopleCount = getPeopleCount(comment);
-      const radius = 0.15 * Math.cbrt(Math.min(peopleCount, 64));
-      const mesh = makeSphere(radius, ROUTE_COLORS[routeName], 1.55);
+      )
+        .applyQuaternion(randomRotation)
+        .multiplyScalar(distanceFromStation);
+      const radius = 0.15 * Math.cbrt(Math.min(profile.count, 64));
+      const mesh = makeSphere(radius, baseColor, 1.55);
       const label = makeNodeLabel(
         comment.title || comment.description || "無題の観察",
-        routeName === "レイソルロード" ? "#9ff2ff" : "#d2c0ff",
+        categoryStyle.soft,
       );
       label.position.set(0, radius + 0.34, 0);
       mesh.add(label);
       mesh.position.copy(position);
       mesh.userData.comment = comment;
+      mesh.userData.baseColor = baseColor;
+      mesh.userData.category = profile.category;
+      mesh.userData.peopleCount = profile.count;
       graph.add(mesh);
-      const line = addConnection(new THREE.Vector3(), position, ROUTE_COLORS[routeName], 0.24, 1.5);
+      const line = addConnection(new THREE.Vector3(), position, baseColor, 0.22, 1.5);
       graph.add(line);
       records.push({ comment, mesh, line, label });
     }
@@ -308,8 +356,7 @@ export function MindMap() {
 
     const setHoverLight = (mesh: THREE.Mesh, active: boolean) => {
       if (mesh.userData.selected) return;
-      const comment = mesh.userData.comment as Comment;
-      const baseColor = ROUTE_COLORS[comment.route];
+      const baseColor = mesh.userData.baseColor as number;
       const material = mesh.material as THREE.MeshPhysicalMaterial;
       material.color.setHex(active ? 0xeaffff : baseColor);
       material.emissive.setHex(baseColor);
@@ -460,9 +507,12 @@ export function MindMap() {
         {loading && <div className="loading">観察コメントを読み込んでいます…</div>}
         <div ref={mountRef} className="canvas-mount" />
         <div className="guide">中心からの距離：観察時刻　ドラッグ：回転　ホイール：拡大縮小　小球をクリック：詳細</div>
-        <div className="route-key" aria-label="ルートの色">
-          <span><i className="cyan" />レイソルロード</span>
-          <span><i className="purple" />テラス</span>
+        <div className="route-key" aria-label="属性カテゴリの色">
+          {(Object.entries(CATEGORY_STYLES) as [CategoryKey, (typeof CATEGORY_STYLES)[CategoryKey]][]).map(
+            ([key, style]) => (
+              <span key={key}><i style={{ background: style.color, boxShadow: `0 0 8px ${style.color}` }} />{style.label}</span>
+            ),
+          )}
         </div>
       </section>
 
@@ -474,6 +524,8 @@ export function MindMap() {
             <h2>{selected.title || "無題の観察"}</h2>
             {selected.description && <p className="description">{selected.description}</p>}
             <dl>
+              <div><dt>属性</dt><dd>{CATEGORY_STYLES[getMemoProfile(selected).category].label}</dd></div>
+              <div><dt>人数</dt><dd>{getMemoProfile(selected).count}人</dd></div>
               <div><dt>調査者</dt><dd>{selected.observer}</dd></div>
               <div><dt>元ファイル</dt><dd>{selected.sourceFile}</dd></div>
             </dl>
