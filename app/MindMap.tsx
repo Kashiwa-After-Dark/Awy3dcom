@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { Line2 } from "three/examples/jsm/lines/Line2.js";
 import { LineGeometry } from "three/examples/jsm/lines/LineGeometry.js";
 import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
@@ -226,6 +227,12 @@ export function MindMap() {
     renderer.toneMappingExposure = 1.2;
     mount.appendChild(renderer.domElement);
 
+    const pmremGenerator = new THREE.PMREMGenerator(renderer);
+    const roomEnvironment = new RoomEnvironment();
+    const environmentMap = pmremGenerator.fromScene(roomEnvironment, 0.04).texture;
+    roomEnvironment.dispose();
+    pmremGenerator.dispose();
+
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.055;
@@ -264,7 +271,20 @@ export function MindMap() {
     const graph = new THREE.Group();
     scene.add(graph);
 
-    const station = makeSphere(2.05, 0x00a7ff, 2.25);
+    const station = new THREE.Mesh(
+      new THREE.SphereGeometry(2.05, 64, 48),
+      new THREE.MeshPhysicalMaterial({
+        color: 0x0b6f99,
+        emissive: 0x001827,
+        emissiveIntensity: 0.38,
+        metalness: 0.88,
+        roughness: 0.055,
+        clearcoat: 1,
+        clearcoatRoughness: 0.025,
+        envMap: environmentMap,
+        envMapIntensity: 2.6,
+      }),
+    );
     graph.add(station);
     const stationLabel = makeLabel("柏駅", "#b9f5ff", 340);
     stationLabel.position.set(0, 0, 2.2);
@@ -323,7 +343,7 @@ export function MindMap() {
       )
         .applyQuaternion(randomRotation)
         .multiplyScalar(distanceFromStation);
-      const radius = 0.15 * Math.cbrt(Math.min(profile.count, 64));
+      const radius = 0.22 * Math.cbrt(Math.min(profile.count, 64));
       const mesh = makeSphere(radius, baseColor, 1.55);
       const label = makeNodeLabel(
         comment.title || comment.description || "無題の観察",
@@ -469,6 +489,7 @@ export function MindMap() {
       controls.removeEventListener("start", cancelFocus);
       controls.dispose();
       renderer.dispose();
+      environmentMap.dispose();
       mount.removeChild(renderer.domElement);
       recordsRef.current = [];
     };
