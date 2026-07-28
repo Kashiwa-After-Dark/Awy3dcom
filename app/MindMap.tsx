@@ -3,6 +3,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { Line2 } from "three/examples/jsm/lines/Line2.js";
+import { LineGeometry } from "three/examples/jsm/lines/LineGeometry.js";
+import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 
 type RouteName = "レイソルロード" | "テラス" | "未分類";
 
@@ -22,7 +25,8 @@ type Comment = {
 type NodeRecord = {
   comment: Comment;
   mesh: THREE.Mesh;
-  line: THREE.Line;
+  line: Line2;
+  label: THREE.Sprite;
 };
 
 const ROUTE_COLORS = {
@@ -52,6 +56,32 @@ function makeLabel(text: string, color: string, width = 512) {
   return sprite;
 }
 
+function makeNodeLabel(text: string, color: string) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 512;
+  canvas.height = 96;
+  const context = canvas.getContext("2d")!;
+  context.font = "500 23px 'Yu Gothic', 'Meiryo', sans-serif";
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  context.shadowColor = "#01050d";
+  context.shadowBlur = 5;
+  context.lineWidth = 4;
+  context.strokeStyle = "rgba(1, 5, 13, 0.72)";
+  context.fillStyle = color;
+  const displayText = text.length > 16 ? `${text.slice(0, 15)}…` : text;
+  context.strokeText(displayText, 256, 48);
+  context.fillText(displayText, 256, 48);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  const label = new THREE.Sprite(
+    new THREE.SpriteMaterial({ map: texture, transparent: true, opacity: 0.68, depthWrite: false }),
+  );
+  label.scale.set(2.7, 0.5, 1);
+  label.visible = false;
+  return label;
+}
+
 function makeSphere(radius: number, color: number, intensity = 1.5) {
   return new THREE.Mesh(
     new THREE.SphereGeometry(radius, 32, 24),
@@ -72,14 +102,10 @@ function makeGlow(radius: number, color: number) {
   canvas.width = 128;
   canvas.height = 128;
   const context = canvas.getContext("2d")!;
-  const rgb = new THREE.Color(color);
-  const red = Math.round(rgb.r * 255);
-  const green = Math.round(rgb.g * 255);
-  const blue = Math.round(rgb.b * 255);
   const gradient = context.createRadialGradient(64, 64, 8, 64, 64, 64);
-  gradient.addColorStop(0, `rgba(${red}, ${green}, ${blue}, 0.95)`);
-  gradient.addColorStop(0.28, `rgba(${red}, ${green}, ${blue}, 0.48)`);
-  gradient.addColorStop(1, `rgba(${red}, ${green}, ${blue}, 0)`);
+  gradient.addColorStop(0, "rgba(255, 255, 255, 0.95)");
+  gradient.addColorStop(0.28, "rgba(255, 255, 255, 0.48)");
+  gradient.addColorStop(1, "rgba(255, 255, 255, 0)");
   context.fillStyle = gradient;
   context.fillRect(0, 0, 128, 128);
 
@@ -149,8 +175,29 @@ export function MindMap() {
       const visible = matches(record.comment);
       record.mesh.visible = visible;
       record.line.visible = visible;
+      if (!visible) record.label.visible = false;
     }
   }, [matches]);
+
+  useEffect(() => {
+    for (const record of recordsRef.current) {
+      const isSelected = record.comment.id === selected?.id;
+      const baseColor = ROUTE_COLORS[record.comment.route];
+      const material = record.mesh.material as THREE.MeshPhysicalMaterial;
+      const glow = record.mesh.userData.glow as THREE.Sprite;
+      const glowMaterial = glow.material as THREE.SpriteMaterial;
+      record.mesh.userData.selected = isSelected;
+      material.color.setHex(isSelected ? 0xf5ffd7 : baseColor);
+      material.emissive.setHex(isSelected ? 0xc8ff00 : baseColor);
+      material.emissiveIntensity = isSelected ? 9 : 1.55;
+      material.roughness = isSelected ? 0.08 : 0.24;
+      material.metalness = isSelected ? 0 : 0.5;
+      material.opacity = isSelected ? 1 : 0.94;
+      glowMaterial.color.setHex(baseColor);
+      glowMaterial.opacity = 0.82;
+      glow.visible = false;
+    }
+  }, [selected]);
 
   useEffect(() => {
     if (!mountRef.current || comments.length === 0) return;
@@ -220,12 +267,28 @@ export function MindMap() {
       未分類: new THREE.Vector3(0, -6, 0),
     };
 
-    const addConnection = (from: THREE.Vector3, to: THREE.Vector3, color: number, opacity = 0.6) => {
-      const geometry = new THREE.BufferGeometry().setFromPoints([from, to]);
-      return new THREE.Line(
-        geometry,
-        new THREE.LineBasicMaterial({ color, transparent: true, opacity, depthWrite: false }),
-      );
+    const lineMaterials: LineMaterial[] = [];
+    const addConnection = (
+      from: THREE.Vector3,
+      to: THREE.Vector3,
+      color: number,
+      opacity = 0.6,
+      width = 1.5,
+    ) => {
+      const geometry = new LineGeometry();
+      geometry.setPositions([from.x, from.y, from.z, to.x, to.y, to.z]);
+      const material = new LineMaterial({
+        color,
+        linewidth: width,
+        transparent: true,
+        opacity,
+        depthWrite: false,
+      });
+      material.resolution.set(mount.clientWidth, mount.clientHeight);
+      lineMaterials.push(material);
+      const line = new Line2(geometry, material);
+      line.computeLineDistances();
+      return line;
     };
 
     for (const routeName of ["レイソルロード", "テラス"] as RouteName[]) {
@@ -236,7 +299,7 @@ export function MindMap() {
       const label = makeLabel(routeName, routeName === "レイソルロード" ? "#6be7ff" : "#bda1ff", 600);
       label.position.copy(anchor).add(new THREE.Vector3(0, 0, 1.7));
       graph.add(label);
-      graph.add(addConnection(new THREE.Vector3(), anchor, ROUTE_COLORS[routeName], 0.85));
+      graph.add(addConnection(new THREE.Vector3(), anchor, ROUTE_COLORS[routeName], 0.85, 3.2));
     }
 
     const perRoute = new Map<RouteName, number>();
@@ -259,14 +322,20 @@ export function MindMap() {
       const radius = 0.15 * Math.cbrt(Math.min(peopleCount, 64));
       const mesh = makeSphere(radius, ROUTE_COLORS[routeName], 1.55);
       const glow = makeGlow(radius, ROUTE_COLORS[routeName]);
+      const label = makeNodeLabel(
+        comment.title || comment.description || "無題の観察",
+        routeName === "レイソルロード" ? "#9ff2ff" : "#d2c0ff",
+      );
+      label.position.set(0, radius + 0.34, 0);
       mesh.add(glow);
+      mesh.add(label);
       mesh.position.copy(position);
       mesh.userData.comment = comment;
       mesh.userData.glow = glow;
       graph.add(mesh);
-      const line = addConnection(anchor, position, ROUTE_COLORS[routeName], 0.17);
+      const line = addConnection(anchor, position, ROUTE_COLORS[routeName], 0.24, 1.5);
       graph.add(line);
-      records.push({ comment, mesh, line });
+      records.push({ comment, mesh, line, label });
     }
     recordsRef.current = records;
 
@@ -288,10 +357,12 @@ export function MindMap() {
       raycaster.setFromCamera(pointer, camera);
       const candidates = records.filter((record) => record.mesh.visible).map((record) => record.mesh);
       const hit = raycaster.intersectObjects(candidates, false)[0]?.object as THREE.Mesh | undefined;
-      if (hovered && hovered !== hit) (hovered.userData.glow as THREE.Sprite).visible = false;
+      if (hovered && hovered !== hit && !hovered.userData.selected) {
+        (hovered.userData.glow as THREE.Sprite).visible = false;
+      }
       hovered = hit ?? null;
       renderer.domElement.style.cursor = hit ? "pointer" : "grab";
-      if (hit) (hit.userData.glow as THREE.Sprite).visible = true;
+      if (hit && !hit.userData.selected) (hit.userData.glow as THREE.Sprite).visible = true;
       if (commit && hit?.userData.comment) {
         setSelected(hit.userData.comment as Comment);
         const targetTo = hit.getWorldPosition(new THREE.Vector3());
@@ -309,7 +380,7 @@ export function MindMap() {
       }
     };
     const clearHover = () => {
-      if (hovered) (hovered.userData.glow as THREE.Sprite).visible = false;
+      if (hovered && !hovered.userData.selected) (hovered.userData.glow as THREE.Sprite).visible = false;
       hovered = null;
       renderer.domElement.style.cursor = "grab";
     };
@@ -324,6 +395,7 @@ export function MindMap() {
       camera.aspect = mount.clientWidth / mount.clientHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(mount.clientWidth, mount.clientHeight);
+      for (const material of lineMaterials) material.resolution.set(mount.clientWidth, mount.clientHeight);
     };
     window.addEventListener("resize", onResize);
 
@@ -333,6 +405,7 @@ export function MindMap() {
     controls.addEventListener("start", cancelFocus);
 
     let animation = 0;
+    let labelFrame = 0;
     const tick = () => {
       animation = requestAnimationFrame(tick);
       station.rotation.y += 0.003;
@@ -342,6 +415,31 @@ export function MindMap() {
         camera.position.lerpVectors(focusTransition.cameraFrom, focusTransition.cameraTo, eased);
         controls.target.lerpVectors(focusTransition.targetFrom, focusTransition.targetTo, eased);
         if (progress === 1) focusTransition = null;
+      }
+      labelFrame += 1;
+      if (labelFrame % 6 === 0) {
+        const selectedRecord = records.find((record) => record.mesh.userData.selected);
+        const selectedPosition = selectedRecord?.mesh.position;
+        const nearby = records
+          .filter((record) => record.mesh.visible)
+          .map((record) => {
+            const cameraDistance = camera.position.distanceTo(record.mesh.position);
+            const selectedDistance = selectedPosition
+              ? selectedPosition.distanceTo(record.mesh.position)
+              : Number.POSITIVE_INFINITY;
+            return { record, cameraDistance, selectedDistance };
+          })
+          .filter(({ record, cameraDistance, selectedDistance }) =>
+            record.mesh.userData.selected || cameraDistance < 5.8 || selectedDistance < 2.8,
+          )
+          .sort((a, b) => {
+            const aDistance = a.record.mesh.userData.selected ? -1 : Math.min(a.cameraDistance, a.selectedDistance);
+            const bDistance = b.record.mesh.userData.selected ? -1 : Math.min(b.cameraDistance, b.selectedDistance);
+            return aDistance - bDistance;
+          })
+          .slice(0, 8);
+        const visibleLabels = new Set(nearby.map(({ record }) => record));
+        for (const record of records) record.label.visible = visibleLabels.has(record);
       }
       controls.update();
       renderer.render(scene, camera);
