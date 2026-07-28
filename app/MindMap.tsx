@@ -67,11 +67,51 @@ function makeSphere(radius: number, color: number, intensity = 1.5) {
   );
 }
 
+function makeGlow(radius: number, color: number) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 128;
+  canvas.height = 128;
+  const context = canvas.getContext("2d")!;
+  const rgb = new THREE.Color(color);
+  const red = Math.round(rgb.r * 255);
+  const green = Math.round(rgb.g * 255);
+  const blue = Math.round(rgb.b * 255);
+  const gradient = context.createRadialGradient(64, 64, 8, 64, 64, 64);
+  gradient.addColorStop(0, `rgba(${red}, ${green}, ${blue}, 0.95)`);
+  gradient.addColorStop(0.28, `rgba(${red}, ${green}, ${blue}, 0.48)`);
+  gradient.addColorStop(1, `rgba(${red}, ${green}, ${blue}, 0)`);
+  context.fillStyle = gradient;
+  context.fillRect(0, 0, 128, 128);
+
+  const glow = new THREE.Sprite(
+    new THREE.SpriteMaterial({
+      map: new THREE.CanvasTexture(canvas),
+      color,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    }),
+  );
+  glow.scale.setScalar(radius * 5);
+  glow.visible = false;
+  return glow;
+}
+
 function formatTime(value: string) {
   if (!value) return "時刻不明";
   return new Intl.DateTimeFormat("ja-JP", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(
     new Date(value),
   );
+}
+
+function getPeopleCount(comment: Comment) {
+  const text = `${comment.title} ${comment.description}`.normalize("NFKC");
+  const ignoredSuffixes = new Set(["時", "分", "秒", "年", "月", "日", "円", "%", "歳"]);
+  const counts = Array.from(text.matchAll(/\d+/g), (match) => {
+    const end = (match.index ?? 0) + match[0].length;
+    return ignoredSuffixes.has(text.slice(end, end + 1)) ? 0 : Number(match[0]);
+  });
+  return Math.max(1, counts.reduce((total, count) => total + count, 0));
 }
 
 export function MindMap() {
@@ -133,7 +173,7 @@ export function MindMap() {
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.055;
-    controls.minDistance = 10;
+    controls.minDistance = 2.5;
     controls.maxDistance = 52;
     controls.autoRotate = true;
     controls.autoRotateSpeed = 0.22;
@@ -215,10 +255,14 @@ export function MindMap() {
         hourOffset + Math.sin(index * 0.91) * 2.2,
         Math.sin(angle) * ring,
       );
-      const radius = 0.15 + Math.min(comment.title.length, 28) * 0.0025;
+      const peopleCount = getPeopleCount(comment);
+      const radius = 0.15 * Math.cbrt(Math.min(peopleCount, 64));
       const mesh = makeSphere(radius, ROUTE_COLORS[routeName], 1.55);
+      const glow = makeGlow(radius, ROUTE_COLORS[routeName]);
+      mesh.add(glow);
       mesh.position.copy(position);
       mesh.userData.comment = comment;
+      mesh.userData.glow = glow;
       graph.add(mesh);
       const line = addConnection(anchor, position, ROUTE_COLORS[routeName], 0.17);
       graph.add(line);
@@ -229,6 +273,13 @@ export function MindMap() {
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
     let hovered: THREE.Mesh | null = null;
+    let focusTransition: {
+      cameraFrom: THREE.Vector3;
+      cameraTo: THREE.Vector3;
+      targetFrom: THREE.Vector3;
+      targetTo: THREE.Vector3;
+      startedAt: number;
+    } | null = null;
 
     const pick = (event: PointerEvent, commit: boolean) => {
       const rect = renderer.domElement.getBoundingClientRect();
@@ -237,15 +288,35 @@ export function MindMap() {
       raycaster.setFromCamera(pointer, camera);
       const candidates = records.filter((record) => record.mesh.visible).map((record) => record.mesh);
       const hit = raycaster.intersectObjects(candidates, false)[0]?.object as THREE.Mesh | undefined;
-      if (hovered && hovered !== hit) hovered.scale.setScalar(1);
+      if (hovered && hovered !== hit) (hovered.userData.glow as THREE.Sprite).visible = false;
       hovered = hit ?? null;
       renderer.domElement.style.cursor = hit ? "pointer" : "grab";
-      if (hit) hit.scale.setScalar(2.2);
-      if (commit && hit?.userData.comment) setSelected(hit.userData.comment as Comment);
+      if (hit) (hit.userData.glow as THREE.Sprite).visible = true;
+      if (commit && hit?.userData.comment) {
+        setSelected(hit.userData.comment as Comment);
+        const targetTo = hit.getWorldPosition(new THREE.Vector3());
+        const viewDirection = camera.position.clone().sub(controls.target).normalize();
+        const radius = (hit.geometry as THREE.SphereGeometry).parameters.radius;
+        const focusDistance = Math.max(3.2, radius * 9);
+        focusTransition = {
+          cameraFrom: camera.position.clone(),
+          cameraTo: targetTo.clone().addScaledVector(viewDirection, focusDistance),
+          targetFrom: controls.target.clone(),
+          targetTo,
+          startedAt: performance.now(),
+        };
+        controls.autoRotate = false;
+      }
+    };
+    const clearHover = () => {
+      if (hovered) (hovered.userData.glow as THREE.Sprite).visible = false;
+      hovered = null;
+      renderer.domElement.style.cursor = "grab";
     };
     const onMove = (event: PointerEvent) => pick(event, false);
     const onClick = (event: PointerEvent) => pick(event, true);
     renderer.domElement.addEventListener("pointermove", onMove);
+    renderer.domElement.addEventListener("pointerleave", clearHover);
     renderer.domElement.addEventListener("click", onClick);
 
     const onResize = () => {
@@ -256,10 +327,22 @@ export function MindMap() {
     };
     window.addEventListener("resize", onResize);
 
+    const cancelFocus = () => {
+      focusTransition = null;
+    };
+    controls.addEventListener("start", cancelFocus);
+
     let animation = 0;
     const tick = () => {
       animation = requestAnimationFrame(tick);
       station.rotation.y += 0.003;
+      if (focusTransition) {
+        const progress = Math.min((performance.now() - focusTransition.startedAt) / 700, 1);
+        const eased = 1 - Math.pow(1 - progress, 3);
+        camera.position.lerpVectors(focusTransition.cameraFrom, focusTransition.cameraTo, eased);
+        controls.target.lerpVectors(focusTransition.targetFrom, focusTransition.targetTo, eased);
+        if (progress === 1) focusTransition = null;
+      }
       controls.update();
       renderer.render(scene, camera);
     };
@@ -269,7 +352,9 @@ export function MindMap() {
       cancelAnimationFrame(animation);
       window.removeEventListener("resize", onResize);
       renderer.domElement.removeEventListener("pointermove", onMove);
+      renderer.domElement.removeEventListener("pointerleave", clearHover);
       renderer.domElement.removeEventListener("click", onClick);
+      controls.removeEventListener("start", cancelFocus);
       controls.dispose();
       renderer.dispose();
       mount.removeChild(renderer.domElement);
@@ -325,7 +410,6 @@ export function MindMap() {
             {selected.description && <p className="description">{selected.description}</p>}
             <dl>
               <div><dt>調査者</dt><dd>{selected.observer}</dd></div>
-              <div><dt>座標</dt><dd>{selected.latitude.toFixed(6)}, {selected.longitude.toFixed(6)}</dd></div>
               <div><dt>元ファイル</dt><dd>{selected.sourceFile}</dd></div>
             </dl>
           </>
