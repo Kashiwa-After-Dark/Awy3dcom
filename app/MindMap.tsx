@@ -97,37 +97,17 @@ function makeSphere(radius: number, color: number, intensity = 1.5) {
   );
 }
 
-function makeGlow(radius: number, color: number) {
-  const canvas = document.createElement("canvas");
-  canvas.width = 128;
-  canvas.height = 128;
-  const context = canvas.getContext("2d")!;
-  const gradient = context.createRadialGradient(64, 64, 8, 64, 64, 64);
-  gradient.addColorStop(0, "rgba(255, 255, 255, 0.95)");
-  gradient.addColorStop(0.28, "rgba(255, 255, 255, 0.48)");
-  gradient.addColorStop(1, "rgba(255, 255, 255, 0)");
-  context.fillStyle = gradient;
-  context.fillRect(0, 0, 128, 128);
-
-  const glow = new THREE.Sprite(
-    new THREE.SpriteMaterial({
-      map: new THREE.CanvasTexture(canvas),
-      color,
-      transparent: true,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    }),
-  );
-  glow.scale.setScalar(radius * 5);
-  glow.visible = false;
-  return glow;
-}
-
 function formatTime(value: string) {
   if (!value) return "時刻不明";
   return new Intl.DateTimeFormat("ja-JP", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(
     new Date(value),
   );
+}
+
+function getObservationMinutes(comment: Comment) {
+  const match = comment.time.match(/T(\d{2}):(\d{2})/);
+  if (match) return Number(match[1]) * 60 + Number(match[2]);
+  return (comment.hour ?? 18) * 60;
 }
 
 function getPeopleCount(comment: Comment) {
@@ -184,8 +164,6 @@ export function MindMap() {
       const isSelected = record.comment.id === selected?.id;
       const baseColor = ROUTE_COLORS[record.comment.route];
       const material = record.mesh.material as THREE.MeshPhysicalMaterial;
-      const glow = record.mesh.userData.glow as THREE.Sprite;
-      const glowMaterial = glow.material as THREE.SpriteMaterial;
       record.mesh.userData.selected = isSelected;
       material.color.setHex(isSelected ? 0xf5ffd7 : baseColor);
       material.emissive.setHex(isSelected ? 0xc8ff00 : baseColor);
@@ -193,9 +171,6 @@ export function MindMap() {
       material.roughness = isSelected ? 0.08 : 0.24;
       material.metalness = isSelected ? 0 : 0.5;
       material.opacity = isSelected ? 1 : 0.94;
-      glowMaterial.color.setHex(baseColor);
-      glowMaterial.opacity = 0.82;
-      glow.visible = false;
     }
   }, [selected]);
 
@@ -261,12 +236,6 @@ export function MindMap() {
     stationLabel.position.set(0, 0, 2.2);
     graph.add(stationLabel);
 
-    const anchors: Record<RouteName, THREE.Vector3> = {
-      レイソルロード: new THREE.Vector3(-7.2, 0, 0),
-      テラス: new THREE.Vector3(7.2, 0, 0),
-      未分類: new THREE.Vector3(0, -6, 0),
-    };
-
     const lineMaterials: LineMaterial[] = [];
     const addConnection = (
       from: THREE.Vector3,
@@ -291,49 +260,36 @@ export function MindMap() {
       return line;
     };
 
-    for (const routeName of ["レイソルロード", "テラス"] as RouteName[]) {
-      const anchor = anchors[routeName];
-      const routeSphere = makeSphere(1.45, ROUTE_COLORS[routeName], 1.9);
-      routeSphere.position.copy(anchor);
-      graph.add(routeSphere);
-      const label = makeLabel(routeName, routeName === "レイソルロード" ? "#6be7ff" : "#bda1ff", 600);
-      label.position.copy(anchor).add(new THREE.Vector3(0, 0, 1.7));
-      graph.add(label);
-      graph.add(addConnection(new THREE.Vector3(), anchor, ROUTE_COLORS[routeName], 0.85, 3.2));
-    }
-
-    const perRoute = new Map<RouteName, number>();
     const records: NodeRecord[] = [];
+    const observationMinutes = comments.map(getObservationMinutes);
+    const earliestMinutes = Math.min(...observationMinutes);
+    const latestMinutes = Math.max(...observationMinutes);
+    const timeSpan = Math.max(latestMinutes - earliestMinutes, 1);
     for (const comment of comments) {
       const routeName = comment.route;
-      const index = perRoute.get(routeName) ?? 0;
-      perRoute.set(routeName, index + 1);
-      const anchor = anchors[routeName];
-      const golden = Math.PI * (3 - Math.sqrt(5));
-      const angle = index * golden;
-      const ring = 3.2 + (index % 13) * 0.19;
-      const hourOffset = ((comment.hour ?? 21) - 20.5) * 0.64;
+      const vertical = Math.random() * 2 - 1;
+      const horizontal = Math.sqrt(1 - vertical * vertical);
+      const angle = Math.random() * Math.PI * 2;
+      const timeProgress = (getObservationMinutes(comment) - earliestMinutes) / timeSpan;
+      const distanceFromStation = 5 + timeProgress * 12;
       const position = new THREE.Vector3(
-        anchor.x + Math.cos(angle) * ring,
-        hourOffset + Math.sin(index * 0.91) * 2.2,
-        Math.sin(angle) * ring,
-      );
+        Math.cos(angle) * horizontal,
+        vertical,
+        Math.sin(angle) * horizontal,
+      ).multiplyScalar(distanceFromStation);
       const peopleCount = getPeopleCount(comment);
       const radius = 0.15 * Math.cbrt(Math.min(peopleCount, 64));
       const mesh = makeSphere(radius, ROUTE_COLORS[routeName], 1.55);
-      const glow = makeGlow(radius, ROUTE_COLORS[routeName]);
       const label = makeNodeLabel(
         comment.title || comment.description || "無題の観察",
         routeName === "レイソルロード" ? "#9ff2ff" : "#d2c0ff",
       );
       label.position.set(0, radius + 0.34, 0);
-      mesh.add(glow);
       mesh.add(label);
       mesh.position.copy(position);
       mesh.userData.comment = comment;
-      mesh.userData.glow = glow;
       graph.add(mesh);
-      const line = addConnection(anchor, position, ROUTE_COLORS[routeName], 0.24, 1.5);
+      const line = addConnection(new THREE.Vector3(), position, ROUTE_COLORS[routeName], 0.24, 1.5);
       graph.add(line);
       records.push({ comment, mesh, line, label });
     }
@@ -350,6 +306,19 @@ export function MindMap() {
       startedAt: number;
     } | null = null;
 
+    const setHoverLight = (mesh: THREE.Mesh, active: boolean) => {
+      if (mesh.userData.selected) return;
+      const comment = mesh.userData.comment as Comment;
+      const baseColor = ROUTE_COLORS[comment.route];
+      const material = mesh.material as THREE.MeshPhysicalMaterial;
+      material.color.setHex(active ? 0xeaffff : baseColor);
+      material.emissive.setHex(baseColor);
+      material.emissiveIntensity = active ? 6 : 1.55;
+      material.roughness = active ? 0.06 : 0.24;
+      material.metalness = active ? 0 : 0.5;
+      material.opacity = active ? 1 : 0.94;
+    };
+
     const pick = (event: PointerEvent, commit: boolean) => {
       const rect = renderer.domElement.getBoundingClientRect();
       pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
@@ -357,12 +326,10 @@ export function MindMap() {
       raycaster.setFromCamera(pointer, camera);
       const candidates = records.filter((record) => record.mesh.visible).map((record) => record.mesh);
       const hit = raycaster.intersectObjects(candidates, false)[0]?.object as THREE.Mesh | undefined;
-      if (hovered && hovered !== hit && !hovered.userData.selected) {
-        (hovered.userData.glow as THREE.Sprite).visible = false;
-      }
+      if (hovered && hovered !== hit) setHoverLight(hovered, false);
       hovered = hit ?? null;
       renderer.domElement.style.cursor = hit ? "pointer" : "grab";
-      if (hit && !hit.userData.selected) (hit.userData.glow as THREE.Sprite).visible = true;
+      if (hit) setHoverLight(hit, true);
       if (commit && hit?.userData.comment) {
         setSelected(hit.userData.comment as Comment);
         const targetTo = hit.getWorldPosition(new THREE.Vector3());
@@ -380,7 +347,7 @@ export function MindMap() {
       }
     };
     const clearHover = () => {
-      if (hovered && !hovered.userData.selected) (hovered.userData.glow as THREE.Sprite).visible = false;
+      if (hovered) setHoverLight(hovered, false);
       hovered = null;
       renderer.domElement.style.cursor = "grab";
     };
@@ -492,7 +459,7 @@ export function MindMap() {
       <section className="stage" aria-label="3Dマインドマップ">
         {loading && <div className="loading">観察コメントを読み込んでいます…</div>}
         <div ref={mountRef} className="canvas-mount" />
-        <div className="guide">ドラッグ：回転　ホイール：拡大縮小　小球をクリック：詳細</div>
+        <div className="guide">中心からの距離：観察時刻　ドラッグ：回転　ホイール：拡大縮小　小球をクリック：詳細</div>
         <div className="route-key" aria-label="ルートの色">
           <span><i className="cyan" />レイソルロード</span>
           <span><i className="purple" />テラス</span>
