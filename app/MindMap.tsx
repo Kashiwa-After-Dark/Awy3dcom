@@ -500,7 +500,7 @@ export function MindMap() {
       <header className="topbar">
         <div>
           <p className="eyebrow">KASHIWA AFTER DARK / FIELD NOTES</p>
-          <h1>柏駅・夜間観察 3Dマインドマップ</h1>
+          <h1>3Dcomment</h1>
         </div>
         <div className="count"><strong>{visibleCount}</strong><span>表示コメント</span></div>
       </header>
@@ -524,7 +524,7 @@ export function MindMap() {
         </label>
       </section>
 
-      <section className="stage" aria-label="3Dマインドマップ">
+      <section className="stage" aria-label="3Dcomment">
         {loading && <div className="loading">観察コメントを読み込んでいます…</div>}
         <div ref={mountRef} className="canvas-mount" />
         <div className="guide">中心からの距離：観察時刻　ドラッグ：回転　ホイール：拡大縮小　小球をクリック：詳細</div>
